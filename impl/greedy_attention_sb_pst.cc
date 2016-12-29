@@ -27,7 +27,7 @@
 #include "dynet/rnn.h"
 #include "c2.h"
 
-float drop = 0.3;
+float pdrop = 0.3;
 bool DEBUG = false;
 cpyp::Corpus corpus;
 volatile bool requested_stop = false;
@@ -260,7 +260,7 @@ Expression log_prob_parser(ComputationGraph* hg,
                      const vector<string>& setOfActions,
                      const map<unsigned, std::string>& intToWords,
                      double *right,
-		     vector<unsigned>* results
+		     vector<unsigned>* results,
 		     bool train) {
     const bool build_training_graph = correct_actions.size() > 0;
 
@@ -383,7 +383,7 @@ if(DEBUG)	std::cerr<<"possible action " << current_valid_actions.size()<<"\n";
       vector<Expression> s_att;
       vector<Expression> s_input;
       s_att.push_back(tanh(affine_transform({s_attbias, s_input2att, concatenate({sent_start_expr,s_position_expr[0]}), s_h2att, prev_h})));
-      s_input.push_back(concatenate({sent_start_expr,,s_position_expr[0]}));
+      s_input.push_back(concatenate({sent_start_expr,s_position_expr[0]}));
       for(unsigned i = 0; i < stack_buffer_split; i ++){
         s_att.push_back(tanh(affine_transform({s_attbias, s_input2att, concatenate({input[i], s_position_expr[i+1]}), s_h2att, prev_h})));
         s_input.push_back(concatenate({input[i],s_position_expr[i+1]}));
@@ -565,7 +565,7 @@ int main(int argc, char** argv) {
   BILSTM_INPUT_DIM = conf["bilstm_input_dim"].as<unsigned>();
   BILSTM_HIDDEN_DIM = conf["bilstm_hidden_dim"].as<unsigned>();
   ATTENTION_HIDDEN_DIM = conf["attention_hidden_dim"].as<unsigned>();
-  STATE_INPUT_DIM = ACTION_DIM + BILSTM_HIDDEN_DIM*2 + BILSTM_HIDDEN_DIM*2;
+  STATE_INPUT_DIM = ACTION_DIM + BILSTM_HIDDEN_DIM*2 + BILSTM_HIDDEN_DIM*2 + PST_DIM*2;
   STATE_HIDDEN_DIM = conf["state_hidden_dim"].as<unsigned>();
   PST_DIM = conf["pst_dim"].as<unsigned>();
   pdrop = conf["pdrop"].as<float>();
