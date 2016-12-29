@@ -349,7 +349,7 @@ if(DEBUG)	std::cerr<<"bilstm ok\n";
     string rootword;
     unsigned action_count = 0;  // incremented at each prediction
     Expression prev_action = action_start;
-    Expression prev_h = state_start;
+    Expression prev_h = zeroes(*hg,{STATE_HIDDEN_DIM});
 
     while(stacki.size() > 2 || bufferi.size() > 1) {
 if(DEBUG)	std::cerr<<"action index " << action_count<<"\n";

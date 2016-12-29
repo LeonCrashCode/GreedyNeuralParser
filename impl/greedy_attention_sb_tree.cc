@@ -27,6 +27,7 @@
 #include "dynet/rnn.h"
 #include "c2.h"
 
+float pdrop = 0.3;
 bool DEBUG = false;
 cpyp::Corpus corpus;
 volatile bool requested_stop = false;
@@ -79,6 +80,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
         ("bilstm_hidden_dim", po::value<unsigned>()->default_value(64), "bilstm hidden dimension")
 	("attention_hidden_dim", po::value<unsigned>()->default_value(64), "attention hidden dimension")
 	("state_hidden_dim", po::value<unsigned>()->default_value(64), "state hidden dimension")
+	("pdrop", po::value<float>()->default_value(0.3), "pdrop")
 	("debug", "debug")
 	("train,t", "Should training be run?")
         ("words,w", po::value<string>(), "Pretrained word embeddings")
@@ -382,7 +384,8 @@ Expression log_prob_parser(ComputationGraph* hg,
                      const vector<string>& setOfActions,
                      const map<unsigned, std::string>& intToWords,
                      double *right,
-		     vector<unsigned>* results) {
+		     vector<unsigned>* results,
+		     bool train) {
     const bool build_training_graph = correct_actions.size() > 0;
 
     l2rbuilder.new_graph(*hg);
@@ -428,21 +431,23 @@ Expression log_prob_parser(ComputationGraph* hg,
     for (unsigned i = 0; i < sent.size(); ++i) {
       assert(sent[i] < VOCAB_SIZE);
       Expression w =lookup(*hg, p_w, sent[i]);
-if(DEBUG)	std::cerr<<corpus.intToWords[sent[i]] << " ";
+      if(train) w = dropout(w,pdrop);
       vector<Expression> args = {lb, w2l, w}; // learn embeddings
       if (USE_POS) { // learn POS tag?
         Expression p = lookup(*hg, p_p, sentPos[i]);
-	args.push_back(p2l);
+        if(train) p = dropout(p,pdrop);
+        args.push_back(p2l);
         args.push_back(p);
       }
       if (pretrained.size() > 0 &&  pretrained.count(raw_sent[i])) {  // include fixed pretrained vectors?
         Expression t = const_lookup(*hg, p_t, raw_sent[i]);
+        if(train) t = dropout(t,pdrop);
         args.push_back(t2l);
-	args.push_back(t);
+        args.push_back(t);
       }
       else{
-	args.push_back(t2l);
-      	args.push_back(zeroes(*hg,{PRETRAINED_DIM}));
+        args.push_back(t2l);
+        args.push_back(zeroes(*hg,{PRETRAINED_DIM}));
       }
       input_expr.push_back(rectify(affine_transform(args)));
     }
@@ -490,7 +495,7 @@ if(DEBUG)	std::cerr<<"bilstm ok\n";
     string rootword;
     unsigned action_count = 0;  // incremented at each prediction
     Expression prev_action = action_start;
-    Expression prev_h = state_start;
+    Expression prev_h = zeroes(*hg,{STATE_HIDDEN_DIM});
 
     vector<Expression> partial;
     vector<Expression> partial_c;
@@ -725,6 +730,8 @@ int main(int argc, char** argv) {
   ATTENTION_HIDDEN_DIM = conf["attention_hidden_dim"].as<unsigned>();
   STATE_INPUT_DIM = ACTION_DIM + BILSTM_HIDDEN_DIM*2 + BILSTM_HIDDEN_DIM*2;
   STATE_HIDDEN_DIM = conf["state_hidden_dim"].as<unsigned>();
+
+  pdrop = conf["pdrop"].as<float>();
  
   DEBUG = conf.count("debug");
 
@@ -842,7 +849,7 @@ int main(int argc, char** argv) {
 	   const vector<unsigned>& sentencePos=corpus.sentencesPos[order[si]]; 
 	   const vector<unsigned>& actions=corpus.correct_act_sent[order[si]];
            ComputationGraph hg;
-           Expression nll = parser.log_prob_parser(&hg,sentence,tsentence,sentencePos,actions,corpus.actions,corpus.intToWords,&right,NULL);
+           Expression nll = parser.log_prob_parser(&hg,sentence,tsentence,sentencePos,actions,corpus.actions,corpus.intToWords,&right,NULL,true);
            double lp = as_scalar(hg.incremental_forward(nll));
            if (lp < 0) {
              cerr << "Log prob < 0 on sentence " << order[si] << ": lp=" << lp << endl;
@@ -880,7 +887,7 @@ int main(int argc, char** argv) {
 
            ComputationGraph hg;
 	   vector<unsigned> pred;
-	   parser.log_prob_parser(&hg,sentence,tsentence,sentencePos,vector<unsigned>(),corpus.actions,corpus.intToWords,&right,&pred);
+	   parser.log_prob_parser(&hg,sentence,tsentence,sentencePos,vector<unsigned>(),corpus.actions,corpus.intToWords,&right,&pred,false);
 	   double lp = 0;
            llh -= lp;
            trs += actions.size();
@@ -931,7 +938,7 @@ int main(int argc, char** argv) {
       ComputationGraph cg;
       double lp = 0;
       vector<unsigned> pred;
-      parser.log_prob_parser(&cg,sentence,tsentence,sentencePos,vector<unsigned>(),corpus.actions,corpus.intToWords,&right,&pred);
+      parser.log_prob_parser(&cg,sentence,tsentence,sentencePos,vector<unsigned>(),corpus.actions,corpus.intToWords,&right,&pred,false);
       llh -= lp;
       trs += actions.size();
       map<int, string> rel_ref, rel_hyp;
