@@ -320,6 +320,7 @@ Expression log_prob_parser(ComputationGraph* hg,
       }
       input_expr.push_back(rectify(affine_transform(args)));
     }
+
 if(DEBUG)	std::cerr<<"lookup table ok\n";
     vector<Expression> l2r(sent.size());
     vector<Expression> r2l(sent.size());
@@ -348,21 +349,8 @@ if(DEBUG)	std::cerr<<"bilstm ok\n";
     vector<Expression> log_probs;
     string rootword;
     unsigned action_count = 0;  // incremented at each prediction
-    
-    vector<Expression> l2rhc = l2rbuilder.final_s();
-    vector<Expression> r2lhc = r2lbuilder.final_s();
-
-    vector<Expression> initc;
-    for(unsigned i = 0; i < LAYERS; i ++){
-      initc.push_back(concatenate({l2rhc[i],r2lhc[i]}));
-    }
-
-    for(unsigned i = 0; i < LAYERS; i ++){
-      initc.push_back(zeroes(*hg, {BILSTM_HIDDEN_DIM*2}));
-    }
-    state_lstm.start_new_sequence(initc);
     Expression prev_action = action_start;
-    Expression prev_h = state_lstm.final_h()[0];
+    Expression prev_h = zeroes(*hg,{STATE_HIDDEN_DIM});
 
     while(stacki.size() > 2 || bufferi.size() > 1) {
 if(DEBUG)	std::cerr<<"action index " << action_count<<"\n";
@@ -405,7 +393,8 @@ if(DEBUG)	std::cerr<<"possible action " << current_valid_actions.size()<<"\n";
 
       //
 if(DEBUG)	std::cerr<<"attention ok\n";
-      Expression h = state_lstm.add_input(concatenate({prev_action, s_att_pool, b_att_pool}));
+//      Expression h = state_lstm.add_input(concatenate({prev_action, s_att_pool, b_att_pool}));
+      Expression h = state_lstm.add_input(prev_action);
 if(DEBUG)	std::cerr<<"state lstm ok\n";
       Expression combo = affine_transform({combobias, h2combo, prev_h, s_att2combo, s_att_pool, b_att2combo, b_att_pool});
       prev_h = h;
@@ -560,11 +549,10 @@ int main(int argc, char** argv) {
   BILSTM_INPUT_DIM = conf["bilstm_input_dim"].as<unsigned>();
   BILSTM_HIDDEN_DIM = conf["bilstm_hidden_dim"].as<unsigned>();
   ATTENTION_HIDDEN_DIM = conf["attention_hidden_dim"].as<unsigned>();
-  STATE_INPUT_DIM = ACTION_DIM + BILSTM_HIDDEN_DIM*2 + BILSTM_HIDDEN_DIM*2;
+  STATE_INPUT_DIM = ACTION_DIM;
   STATE_HIDDEN_DIM = conf["state_hidden_dim"].as<unsigned>();
- 
-  STATE_HIDDEN_DIM = BILSTM_HIDDEN_DIM * 2;
-  pdrop = conf["pdrop"].as<float>();
+
+  pdrop = conf["pdrop"].as<float>(); 
   DEBUG = conf.count("debug");
 
   const unsigned unk_strategy = conf["unk_strategy"].as<unsigned>();

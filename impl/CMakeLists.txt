@@ -7,6 +7,7 @@ foreach(TARGET
 	greedy_attention_b
 	greedy_attention_sb
 	greedy_attention_sb_cond
+	greedy_attention_sb_noC
 
 	greedy_attention_sb_tree
 	greedy_attention_sb_tree_label

@@ -27,7 +27,7 @@
 #include "dynet/rnn.h"
 #include "c2.h"
 
-float pdrop = 0.3;
+float drop = 0.3;
 bool DEBUG = false;
 cpyp::Corpus corpus;
 volatile bool requested_stop = false;
@@ -37,7 +37,7 @@ unsigned PRETRAINED_DIM = 50;
 unsigned ACTION_DIM = 36;
 unsigned POS_DIM = 10;
 unsigned REL_DIM = 8;
-
+unsigned PST_DIM = 64;
 unsigned BILSTM_INPUT_DIM = 64;
 unsigned BILSTM_HIDDEN_DIM = 64;
 unsigned ATTENTION_HIDDEN_DIM = 64;
@@ -74,14 +74,15 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
         ("action_dim", po::value<unsigned>()->default_value(16), "action embedding size")
         ("input_dim", po::value<unsigned>()->default_value(32), "input embedding size")
         ("pretrained_dim", po::value<unsigned>()->default_value(50), "pretrained input dimension")
-        ("pos_dim", po::value<unsigned>()->default_value(12), "POS dimension")
+        ("pst_dim", po::value<unsigned>()->default_value(64), "position dimension")
+	("pos_dim", po::value<unsigned>()->default_value(12), "POS dimension")
         ("rel_dim", po::value<unsigned>()->default_value(10), "relation dimension")
         ("bilstm_input_dim", po::value<unsigned>()->default_value(64), "bilstm input dimension")
         ("bilstm_hidden_dim", po::value<unsigned>()->default_value(64), "bilstm hidden dimension")
 	("attention_hidden_dim", po::value<unsigned>()->default_value(64), "attention hidden dimension")
 	("state_hidden_dim", po::value<unsigned>()->default_value(64), "state hidden dimension")
 	("pdrop", po::value<float>()->default_value(0.3), "pdrop")
-	("debug", "debug")
+        ("debug", "debug")
 	("train,t", "Should training be run?")
         ("words,w", po::value<string>(), "Pretrained word embeddings")
         ("help,h", "Help");
@@ -108,6 +109,10 @@ struct ParserBuilder {
   LookupParameter p_a; // input action embeddings
   LookupParameter p_r; // relation embeddings
   LookupParameter p_p; // pos tag embeddings
+
+  LookupParameter p_spst;
+  LookupParameter p_bpst;
+  
   Parameter p_w2l; // word to LSTM input
   Parameter p_p2l; // POS to LSTM input
   Parameter p_t2l; // pretrained word embeddings to LSTM input
@@ -141,22 +146,24 @@ struct ParserBuilder {
       p_w(model->add_lookup_parameters(VOCAB_SIZE, {INPUT_DIM})),
       p_a(model->add_lookup_parameters(ACTION_SIZE, {ACTION_DIM})),
       p_r(model->add_lookup_parameters(ACTION_SIZE, {REL_DIM})),
+      p_spst(model->add_lookup_parameters(512, {PST_DIM})),
+      p_bpst(model->add_lookup_parameters(512, {PST_DIM})),
       p_w2l(model->add_parameters({BILSTM_INPUT_DIM, INPUT_DIM})),
       p_lb(model->add_parameters({BILSTM_INPUT_DIM})),
       p_action_start(model->add_parameters({ACTION_DIM})),
       p_state_start(model->add_parameters({STATE_HIDDEN_DIM})),
       p_sent_start(model->add_parameters({BILSTM_INPUT_DIM})),
       p_sent_end(model->add_parameters({BILSTM_INPUT_DIM})),
-      p_s_input2att(model->add_parameters({ATTENTION_HIDDEN_DIM, BILSTM_HIDDEN_DIM*2})),
+      p_s_input2att(model->add_parameters({ATTENTION_HIDDEN_DIM, BILSTM_HIDDEN_DIM*2+PST_DIM})),
       p_s_h2att(model->add_parameters({ATTENTION_HIDDEN_DIM, STATE_HIDDEN_DIM})),
       p_s_attbias(model->add_parameters({ATTENTION_HIDDEN_DIM})),
       p_s_att2attexp(model->add_parameters({ATTENTION_HIDDEN_DIM})),
-      p_s_att2combo(model->add_parameters({STATE_HIDDEN_DIM, BILSTM_HIDDEN_DIM*2})),
-      p_b_input2att(model->add_parameters({ATTENTION_HIDDEN_DIM, BILSTM_HIDDEN_DIM*2})),
+      p_s_att2combo(model->add_parameters({STATE_HIDDEN_DIM, BILSTM_HIDDEN_DIM*2+PST_DIM})),
+      p_b_input2att(model->add_parameters({ATTENTION_HIDDEN_DIM, BILSTM_HIDDEN_DIM*2+PST_DIM})),
       p_b_h2att(model->add_parameters({ATTENTION_HIDDEN_DIM, STATE_HIDDEN_DIM})),
       p_b_attbias(model->add_parameters({ATTENTION_HIDDEN_DIM})),
       p_b_att2attexp(model->add_parameters({ATTENTION_HIDDEN_DIM})),
-      p_b_att2combo(model->add_parameters({STATE_HIDDEN_DIM, BILSTM_HIDDEN_DIM*2})),
+      p_b_att2combo(model->add_parameters({STATE_HIDDEN_DIM, BILSTM_HIDDEN_DIM*2+PST_DIM})),
       p_h2combo(model->add_parameters({STATE_HIDDEN_DIM, STATE_HIDDEN_DIM})),
       p_combobias(model->add_parameters({STATE_HIDDEN_DIM})),
       p_combo2rt(model->add_parameters({ACTION_SIZE, STATE_HIDDEN_DIM})),
@@ -253,7 +260,7 @@ Expression log_prob_parser(ComputationGraph* hg,
                      const vector<string>& setOfActions,
                      const map<unsigned, std::string>& intToWords,
                      double *right,
-		     vector<unsigned>* results,
+		     vector<unsigned>* results
 		     bool train) {
     const bool build_training_graph = correct_actions.size() > 0;
 
@@ -304,22 +311,33 @@ Expression log_prob_parser(ComputationGraph* hg,
       vector<Expression> args = {lb, w2l, w}; // learn embeddings
       if (USE_POS) { // learn POS tag?
         Expression p = lookup(*hg, p_p, sentPos[i]);
-        if(train) p = dropout(p,pdrop);
-        args.push_back(p2l);
+	if(train) p = dropout(p,pdrop);
+	args.push_back(p2l);
         args.push_back(p);
       }
       if (pretrained.size() > 0 &&  pretrained.count(raw_sent[i])) {  // include fixed pretrained vectors?
         Expression t = const_lookup(*hg, p_t, raw_sent[i]);
         if(train) t = dropout(t,pdrop);
-        args.push_back(t2l);
-        args.push_back(t);
+	args.push_back(t2l);
+	args.push_back(t);
       }
       else{
-        args.push_back(t2l);
-        args.push_back(zeroes(*hg,{PRETRAINED_DIM}));
+	args.push_back(t2l);
+      	args.push_back(zeroes(*hg,{PRETRAINED_DIM}));
       }
       input_expr.push_back(rectify(affine_transform(args)));
     }
+    vector<Expression> s_position_expr(sent.size()+1);
+    vector<Expression> b_position_expr(sent.size()+1);
+    for (unsigned i = 0; i < sent.size()+1; ++i){
+	s_position_expr[i] = lookup(*hg, p_spst, i);
+	b_position_expr[i] = lookup(*hg, p_bpst, i);
+        if(train){
+		s_position_expr[i] = dropout(s_position_expr[i], pdrop);
+		b_position_expr[i] = dropout(b_position_expr[i], pdrop);
+	}
+    }
+
 if(DEBUG)	std::cerr<<"lookup table ok\n";
     vector<Expression> l2r(sent.size());
     vector<Expression> r2l(sent.size());
@@ -348,21 +366,8 @@ if(DEBUG)	std::cerr<<"bilstm ok\n";
     vector<Expression> log_probs;
     string rootword;
     unsigned action_count = 0;  // incremented at each prediction
-    
-    vector<Expression> l2rhc = l2rbuilder.final_s();
-    vector<Expression> r2lhc = r2lbuilder.final_s();
-
-    vector<Expression> initc;
-    for(unsigned i = 0; i < LAYERS; i ++){
-      initc.push_back(concatenate({l2rhc[i],r2lhc[i]}));
-    }
-
-    for(unsigned i = 0; i < LAYERS; i ++){
-      initc.push_back(zeroes(*hg, {BILSTM_HIDDEN_DIM*2}));
-    }
-    state_lstm.start_new_sequence(initc);
     Expression prev_action = action_start;
-    Expression prev_h = state_lstm.final_h()[0];
+    Expression prev_h = zeroes(*hg, {STATE_HIDDEN_DIM});
 
     while(stacki.size() > 2 || bufferi.size() > 1) {
 if(DEBUG)	std::cerr<<"action index " << action_count<<"\n";
@@ -377,11 +382,11 @@ if(DEBUG)	std::cerr<<"possible action " << current_valid_actions.size()<<"\n";
       //stack attention
       vector<Expression> s_att;
       vector<Expression> s_input;
-      s_att.push_back(tanh(affine_transform({s_attbias, s_input2att, sent_start_expr, s_h2att, prev_h})));
-      s_input.push_back(sent_start_expr);
+      s_att.push_back(tanh(affine_transform({s_attbias, s_input2att, concatenate({sent_start_expr,s_position_expr[0]}), s_h2att, prev_h})));
+      s_input.push_back(concatenate({sent_start_expr,,s_position_expr[0]}));
       for(unsigned i = 0; i < stack_buffer_split; i ++){
-        s_att.push_back(tanh(affine_transform({s_attbias, s_input2att, input[i], s_h2att, prev_h})));
-        s_input.push_back(input[i]);
+        s_att.push_back(tanh(affine_transform({s_attbias, s_input2att, concatenate({input[i], s_position_expr[i+1]}), s_h2att, prev_h})));
+        s_input.push_back(concatenate({input[i],s_position_expr[i+1]}));
       }
       Expression s_att_col = transpose(concatenate_cols(s_att));
       Expression s_attexp = softmax(s_att_col * s_att2attexp);
@@ -392,11 +397,11 @@ if(DEBUG)	std::cerr<<"possible action " << current_valid_actions.size()<<"\n";
       vector<Expression> b_att;
       vector<Expression> b_input;
       for(unsigned i = stack_buffer_split; i < sent.size(); i ++){
-        b_att.push_back(tanh(affine_transform({b_attbias, b_input2att, input[i], b_h2att, prev_h})));
-        b_input.push_back(input[i]);
+        b_att.push_back(tanh(affine_transform({b_attbias, b_input2att, concatenate({input[i], b_position_expr[i-stack_buffer_split+1]}), b_h2att, prev_h})));
+        b_input.push_back(concatenate({input[i],b_position_expr[i-stack_buffer_split+1]}));
       }
-      b_att.push_back(tanh(affine_transform({b_attbias, b_input2att, sent_end_expr, b_h2att, prev_h})));
-      b_input.push_back(sent_end_expr);
+      b_att.push_back(tanh(affine_transform({b_attbias, b_input2att, concatenate({sent_end_expr,b_position_expr[0]}), b_h2att, prev_h})));
+      b_input.push_back(concatenate({sent_end_expr,b_position_expr[0]}));
       Expression b_att_col = transpose(concatenate_cols(b_att));
       Expression b_attexp = softmax(b_att_col * b_att2attexp);
 
@@ -562,8 +567,7 @@ int main(int argc, char** argv) {
   ATTENTION_HIDDEN_DIM = conf["attention_hidden_dim"].as<unsigned>();
   STATE_INPUT_DIM = ACTION_DIM + BILSTM_HIDDEN_DIM*2 + BILSTM_HIDDEN_DIM*2;
   STATE_HIDDEN_DIM = conf["state_hidden_dim"].as<unsigned>();
- 
-  STATE_HIDDEN_DIM = BILSTM_HIDDEN_DIM * 2;
+  PST_DIM = conf["pst_dim"].as<unsigned>();
   pdrop = conf["pdrop"].as<float>();
   DEBUG = conf.count("debug");
 
