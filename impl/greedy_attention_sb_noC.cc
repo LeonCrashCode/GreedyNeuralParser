@@ -273,7 +273,6 @@ Expression log_prob_parser(ComputationGraph* hg,
     if (pretrained.size()>0)
       t2l = parameter(*hg, p_t2l); 
     state_lstm.new_graph(*hg);
-    state_lstm.start_new_sequence();
     //state_lstm.start_new_sequence({zeroes(*hg, {STATE_HIDDEN_DIM}), state_start});
     
     Expression sent_start = parameter(*hg, p_sent_start);
@@ -349,8 +348,21 @@ if(DEBUG)	std::cerr<<"bilstm ok\n";
     vector<Expression> log_probs;
     string rootword;
     unsigned action_count = 0;  // incremented at each prediction
+    
+    vector<Expression> l2rhc = l2rbuilder.final_s();
+    vector<Expression> r2lhc = r2lbuilder.final_s();
+
+    vector<Expression> initc;
+    for(unsigned i = 0; i < LAYERS; i ++){
+      initc.push_back(concatenate({l2rhc[i],r2lhc[i]}));
+    }
+
+    for(unsigned i = 0; i < LAYERS; i ++){
+      initc.push_back(zeroes(*hg, {BILSTM_HIDDEN_DIM*2}));
+    }
+    state_lstm.start_new_sequence(initc);
     Expression prev_action = action_start;
-    Expression prev_h = zeroes(*hg,{STATE_HIDDEN_DIM});
+    Expression prev_h = state_lstm.final_h()[0];
 
     while(stacki.size() > 2 || bufferi.size() > 1) {
 if(DEBUG)	std::cerr<<"action index " << action_count<<"\n";
@@ -552,6 +564,7 @@ int main(int argc, char** argv) {
   STATE_INPUT_DIM = ACTION_DIM;
   STATE_HIDDEN_DIM = conf["state_hidden_dim"].as<unsigned>();
 
+  STATE_HIDDEN_DIM = BILSTM_HIDDEN_DIM * 2;
   pdrop = conf["pdrop"].as<float>(); 
   DEBUG = conf.count("debug");
 
