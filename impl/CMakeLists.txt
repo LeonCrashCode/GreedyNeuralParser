@@ -14,7 +14,13 @@ foreach(TARGET
 	greedy_attention_sb_tree
 	greedy_attention_sb_tree_label
 	greedy_attention_sbd_tree_label
-	greedy_attention_sb_tree2)
+	greedy_attention_sb_tree2
+
+###condition
+	greedy_sb
+	greedy_attention_sb_s0b0
+	greedy_sb_conv
+	)
   ADD_EXECUTABLE(${TARGET} ${TARGET}.cc)
   if (WITH_CUDA_BACKEND)
     target_link_libraries(${TARGET} gdynet ${LIBS})
