@@ -81,6 +81,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
 	("attention_hidden_dim", po::value<unsigned>()->default_value(64), "attention hidden dimension")
 	("state_hidden_dim", po::value<unsigned>()->default_value(64), "state hidden dimension")
 	("pdrop", po::value<float>()->default_value(0.3), "pdrop")
+	("train_methods", po::value<unsigned>()->default_value(0), "0 for simple, 1 for mon, 2 for adagrad, 3 for adam")
 	("debug", "debug")
 	("train,t", "Should training be run?")
         ("words,w", po::value<string>(), "Pretrained word embeddings")
@@ -644,10 +645,22 @@ int main(int argc, char** argv) {
   //TRAINING
   if (conf.count("train")) {
     signal(SIGINT, signal_callback_handler);
-    SimpleSGDTrainer sgd(&model);
-    //MomentumSGDTrainer sgd(&model);
-    sgd.eta_decay = 0.08;
-    //sgd.eta_decay = 0.05;
+
+    Trainer* sgd = NULL;
+    unsigned method = conf["train_methods"].as<unsigned>();
+    if(method == 0)
+        sgd = new SimpleSGDTrainer(&model,0.1, 0.1);
+    else if(method == 1)
+        sgd = new MomentumSGDTrainer(&model,0.01, 0.9, 0.1);
+    else if(method == 2){
+        sgd = new AdagradTrainer(&model);
+        sgd->clipping_enabled = false;
+    }
+    else if(method == 3){
+        sgd = new AdamTrainer(&model);
+        sgd->clipping_enabled = false;
+    }
+
     vector<unsigned> order(corpus.nsentences);
     for (unsigned i = 0; i < corpus.nsentences; ++i)
       order[i] = i;
@@ -667,7 +680,7 @@ int main(int argc, char** argv) {
       for (unsigned sii = 0; sii < status_every_i_iterations; ++sii) {
            if (si == corpus.nsentences) {
              si = 0;
-             if (first) { first = false; } else { sgd.update_epoch(); }
+             if (first) { first = false; } else { sgd->update_epoch(); }
              cerr << "**SHUFFLE\n";
              random_shuffle(order.begin(), order.end());
            }
@@ -688,12 +701,12 @@ int main(int argc, char** argv) {
              assert(lp >= 0.0);
            }
            hg.backward(nll);
-           sgd.update(1.0);
+           sgd->update(1.0);
            llh += lp;
            ++si;
            trs += actions.size();
       }
-      sgd.status();
+      sgd->status();
       time_t time_now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
       cerr << "update #" << iter << " (epoch " << (tot_seen / corpus.nsentences) << " |time=" << localtime(&time_now) << ")\tllh: "<< llh<<" ppl: " << exp(llh / trs) << " err: " << (trs - right) / trs << endl;
       llh = trs = right = 0;
@@ -750,6 +763,7 @@ int main(int argc, char** argv) {
         }
       }
     }
+    delete sgd;
   } // should do training?
   if (true) { // do test evaluation
     double llh = 0;
