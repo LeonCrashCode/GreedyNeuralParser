@@ -142,35 +142,35 @@ struct ParserBuilder {
       p_w(model->add_lookup_parameters(VOCAB_SIZE, {INPUT_DIM})),
       p_a(model->add_lookup_parameters(ACTION_SIZE, {ACTION_DIM})),
       p_r(model->add_lookup_parameters(ACTION_SIZE, {REL_DIM})),
-      p_w2l(model->add_parameters({BILSTM_INPUT_DIM, INPUT_DIM},0.001)),
-      p_lb(model->add_parameters({BILSTM_INPUT_DIM},0.01)),
-      p_action_start(model->add_parameters({ACTION_DIM},0.01)),
-      p_state_start(model->add_parameters({STATE_HIDDEN_DIM},0.01)),
-      p_sent_start(model->add_parameters({BILSTM_INPUT_DIM},0.01)),
-      p_sent_end(model->add_parameters({BILSTM_INPUT_DIM},0.01)),
-      p_s_input2att(model->add_parameters({ATTENTION_HIDDEN_DIM, BILSTM_HIDDEN_DIM*2},0.01)),
-      p_s_h2att(model->add_parameters({ATTENTION_HIDDEN_DIM, STATE_HIDDEN_DIM},0.01)),
-      p_s_attbias(model->add_parameters({ATTENTION_HIDDEN_DIM},0.01)),
-      p_s_att2attexp(model->add_parameters({ATTENTION_HIDDEN_DIM},0.01)),
-      p_s_att2combo(model->add_parameters({STATE_HIDDEN_DIM, BILSTM_HIDDEN_DIM*2},0.01)),
-      p_b_input2att(model->add_parameters({ATTENTION_HIDDEN_DIM, BILSTM_HIDDEN_DIM*2},0.01)),
-      p_b_h2att(model->add_parameters({ATTENTION_HIDDEN_DIM, STATE_HIDDEN_DIM},0.01)),
-      p_b_attbias(model->add_parameters({ATTENTION_HIDDEN_DIM},0.01)),
-      p_b_att2attexp(model->add_parameters({ATTENTION_HIDDEN_DIM},0.01)),
-      p_b_att2combo(model->add_parameters({STATE_HIDDEN_DIM, BILSTM_HIDDEN_DIM*2},0.01)),
-      p_h2combo(model->add_parameters({STATE_HIDDEN_DIM, STATE_HIDDEN_DIM},0.01)),
-      p_combobias(model->add_parameters({STATE_HIDDEN_DIM},0.01)),
-      p_combo2rt(model->add_parameters({ACTION_SIZE, STATE_HIDDEN_DIM},0.01)),
-      p_rtbias(model->add_parameters({ACTION_SIZE},0.01)){
+      p_w2l(model->add_parameters({BILSTM_INPUT_DIM, INPUT_DIM})),
+      p_lb(model->add_parameters({BILSTM_INPUT_DIM})),
+      p_action_start(model->add_parameters({ACTION_DIM})),
+      p_state_start(model->add_parameters({STATE_HIDDEN_DIM})),
+      p_sent_start(model->add_parameters({BILSTM_INPUT_DIM})),
+      p_sent_end(model->add_parameters({BILSTM_INPUT_DIM})),
+      p_s_input2att(model->add_parameters({ATTENTION_HIDDEN_DIM, BILSTM_HIDDEN_DIM*2})),
+      p_s_h2att(model->add_parameters({ATTENTION_HIDDEN_DIM, STATE_HIDDEN_DIM})),
+      p_s_attbias(model->add_parameters({ATTENTION_HIDDEN_DIM})),
+      p_s_att2attexp(model->add_parameters({ATTENTION_HIDDEN_DIM})),
+      p_s_att2combo(model->add_parameters({STATE_HIDDEN_DIM, BILSTM_HIDDEN_DIM*2})),
+      p_b_input2att(model->add_parameters({ATTENTION_HIDDEN_DIM, BILSTM_HIDDEN_DIM*2})),
+      p_b_h2att(model->add_parameters({ATTENTION_HIDDEN_DIM, STATE_HIDDEN_DIM})),
+      p_b_attbias(model->add_parameters({ATTENTION_HIDDEN_DIM})),
+      p_b_att2attexp(model->add_parameters({ATTENTION_HIDDEN_DIM})),
+      p_b_att2combo(model->add_parameters({STATE_HIDDEN_DIM, BILSTM_HIDDEN_DIM*2})),
+      p_h2combo(model->add_parameters({STATE_HIDDEN_DIM, STATE_HIDDEN_DIM})),
+      p_combobias(model->add_parameters({STATE_HIDDEN_DIM})),
+      p_combo2rt(model->add_parameters({ACTION_SIZE, STATE_HIDDEN_DIM})),
+      p_rtbias(model->add_parameters({ACTION_SIZE})){
     if (USE_POS) {
       p_p = model->add_lookup_parameters(POS_SIZE, {POS_DIM});
-      p_p2l = model->add_parameters({BILSTM_INPUT_DIM, POS_DIM},0.01);
+      p_p2l = model->add_parameters({BILSTM_INPUT_DIM, POS_DIM});
     }
     if (pretrained.size() > 0) {
       p_t = model->add_lookup_parameters(VOCAB_SIZE, {PRETRAINED_DIM});
       for (auto it : pretrained)
         p_t.initialize(it.first, it.second);
-      p_t2l = model->add_parameters({BILSTM_INPUT_DIM, PRETRAINED_DIM},0.01);
+      p_t2l = model->add_parameters({BILSTM_INPUT_DIM, PRETRAINED_DIM});
     }
   }
 
@@ -413,7 +413,8 @@ if(DEBUG)	std::cerr<<"state lstm ok\n";
       Expression n_combo = rectify(combo);
       Expression rt = affine_transform({rtbias, combo2rt, n_combo});
 if(DEBUG)	std::cerr<<"to action layer ok\n";
-      Expression adiste = log_softmax(rt, current_valid_actions);
+      //Expression adiste = log_softmax(rt, current_valid_actions);
+      Expression adiste = log_softmax(rt);
       vector<float> adist = as_vector(hg->incremental_forward(adiste));
       double best_score = adist[current_valid_actions[0]];
       unsigned best_a = current_valid_actions[0];
@@ -539,9 +540,10 @@ void output_conll(const vector<unsigned>& sentence, const vector<unsigned>& pos,
 
 
 int main(int argc, char** argv) {
-  DynetParams dynet_params = extract_dynet_params(argc, argv);
-  dynet_params.random_seed = 1989121013;
-  dynet::initialize(dynet_params);
+//  DynetParams dynet_params = extract_dynet_params(argc, argv);
+//  dynet_params.random_seed = 1989121013;
+//  dynet::initialize(dynet_params);
+  dynet::initialize(argc, argv);
   cerr << "COMMAND:"; 
   for (unsigned i = 0; i < static_cast<unsigned>(argc); ++i) cerr << ' ' << argv[i];
   cerr << endl;

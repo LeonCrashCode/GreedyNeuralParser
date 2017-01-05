@@ -20,6 +20,8 @@ foreach(TARGET
 	greedy_sb
 	greedy_attention_sb_s0b0
 	greedy_sb_conv
+
+	cuda_att_sb
 	)
   ADD_EXECUTABLE(${TARGET} ${TARGET}.cc)
   if (WITH_CUDA_BACKEND)
