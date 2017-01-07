@@ -113,6 +113,8 @@ struct ParserBuilder {
   Parameter p_p2l; // POS to LSTM input
   Parameter p_t2l; // pretrained word embeddings to LSTM input
   Parameter p_lb; // LSTM input bias
+  Parameter p_action_start; 
+  Parameter p_state_start;
 
   Parameter p_sent_start;
   Parameter p_sent_end;
@@ -142,6 +144,8 @@ struct ParserBuilder {
       p_r(model->add_lookup_parameters(ACTION_SIZE, {REL_DIM})),
       p_w2l(model->add_parameters({BILSTM_INPUT_DIM, INPUT_DIM})),
       p_lb(model->add_parameters({BILSTM_INPUT_DIM})),
+      p_action_start(model->add_parameters({ACTION_DIM})),
+      p_state_start(model->add_parameters({STATE_HIDDEN_DIM})),
       p_sent_start(model->add_parameters({BILSTM_INPUT_DIM})),
       p_sent_end(model->add_parameters({BILSTM_INPUT_DIM})),
       p_s_input2att(model->add_parameters({ATTENTION_HIDDEN_DIM, BILSTM_HIDDEN_DIM*2})),
@@ -170,23 +174,16 @@ struct ParserBuilder {
     }
   }
 
-static bool IsActionForbidden(const string& a, unsigned bsize, unsigned ssize, const vector<int>& stacki) {
-  if (a[1]=='W' && ssize<3) return true;
-  if (a[1]=='W') {
-        int top=stacki[stacki.size()-1];
-        int sec=stacki[stacki.size()-2];
-        if (sec>top) return true;
-  }
-
+static bool IsActionForbidden(const string& a, unsigned bsize, unsigned ssize) {
   bool is_shift = (a[0] == 'S' && a[1]=='H');
   bool is_reduce = !is_shift;
-  if (is_shift && bsize == 1) return true;
-  if (is_reduce && ssize < 3) return true;
-  if (bsize == 2 && // ROOT is the only thing remaining on buffer
-      ssize > 2 && // there is more than a single element on the stack
+  if (is_shift && bsize == 0) return true;
+  if (is_reduce && ssize < 2) return true;
+  if (bsize == 1 && // ROOT is the only thing remaining on buffer
+      ssize > 1 && // there is more than a single element on the stack
       is_shift) return true;
   // only attach left to ROOT
-  if (bsize == 1 && ssize == 3 && a[0] == 'R') return true;
+  if (bsize == 0 && ssize == 2 && a[0] == 'R') return true;
   return false;
 }
 
@@ -259,6 +256,8 @@ Expression log_prob_parser(ComputationGraph* hg,
     l2rbuilder.start_new_sequence();
     r2lbuilder.start_new_sequence();
     // variables in the computation graph representing the parameters
+    Expression action_start = parameter(*hg, p_action_start);
+    Expression state_start = parameter(*hg, p_state_start);
     Expression lb = parameter(*hg, p_lb);
     Expression w2l = parameter(*hg, p_w2l);
     Expression p2l;
@@ -334,12 +333,7 @@ if(DEBUG)	std::cerr<<"lookup table ok\n";
     Expression sent_end_expr = concatenate({l2r_e, r2l_e});
 if(DEBUG)	std::cerr<<"bilstm ok\n";
     // dummy symbol to represent the empty buffer
-    vector<int> bufferi(sent.size() + 1);
-    bufferi[0] = -999;
-    vector<int> stacki;
-    stacki.push_back(-999);
  
-    unsigned stack_buffer_split = 0;
     vector<Expression> log_probs;
     string rootword;
     unsigned action_count = 0;  // incremented at each prediction
@@ -357,9 +351,61 @@ if(DEBUG)	std::cerr<<"bilstm ok\n";
     }
     state_lstm.start_new_sequence(initc);
 
-    while(stacki.size() > 2 || bufferi.size() > 1) {
+    
+    vector<unsigned> beam_split;
+    beam_split.push_back(0);
+    
+    vector<int> prev_index;
+    prev_index.push_back(-1);
+
+    vector<int> prev_action;
+    prev_action.push_back(-1);
+
+    while(action_count < sent.size()*2-1) {
 if(DEBUG)	std::cerr<<"action index " << action_count<<"\n";
      // get list of possible actions for the current parser state
+      for(unsigned beam_index = 0; beam_index < beam_split; beam_index ++){
+	
+	unsigned stack_buffer_split = beam_split[beam_index];
+        vector<unsigned> current_valid_actions;
+	for(auto a:possible_actions) {
+		if(IsActionForbidden(setOfAction[a], sent.size() - stack_buffer_split, stack_buffer_split))
+			continue;
+		current_valid_actions.push_back(a);
+	}
+	
+	Expression prev_h = state_lstm.get_h((RNNPointer)prev_index[beam_index]);
+	Expression prev_action = prev_action[beam_index] < 0 ? action_start : lookup(*hg, p_a, prev_action[beam_index]);
+
+	vector<Expression> s_att;
+        vector<Expression> s_input;
+        s_att.push_back(tanh(affine_transform({s_attbias, s_input2att, sent_start_expr, s_h2att, prev_h})));
+        s_input.push_back(sent_start_expr);
+        for(unsigned i = 0; i < stack_buffer_split; i ++){
+          s_att.push_back(tanh(affine_transform({s_attbias, s_input2att, input[i], s_h2att, prev_h})));
+          s_input.push_back(input[i]);
+        }
+        Expression s_att_col = transpose(concatenate_cols(s_att));
+        Expression s_attexp = softmax(s_att_col * s_att2attexp);
+
+        Expression s_input_col = concatenate_cols(s_input);
+        Expression s_att_pool = s_input_col * s_attexp;
+
+        vector<Expression> b_att;
+        vector<Expression> b_input;
+        for(unsigned i = stack_buffer_split; i < sent.size(); i ++){
+          b_att.push_back(tanh(affine_transform({b_attbias, b_input2att, input[i], b_h2att, prev_h})));
+          b_input.push_back(input[i]);
+        }
+        b_att.push_back(tanh(affine_transform({b_attbias, b_input2att, sent_end_expr, b_h2att, prev_h})));
+        b_input.push_back(sent_end_expr);
+        Expression b_att_col = transpose(concatenate_cols(b_att));
+        Expression b_attexp = softmax(b_att_col * b_att2attexp);
+
+        Expression b_input_col = concatenate_cols(b_input);
+        Expression b_att_pool = b_input_col * b_attexp;
+
+      }	
       vector<unsigned> current_valid_actions;
       for (auto a: possible_actions) {
         if (IsActionForbidden(setOfActions[a], bufferi.size(), stacki.size(), stacki))
@@ -368,7 +414,6 @@ if(DEBUG)	std::cerr<<"action index " << action_count<<"\n";
       }
 if(DEBUG)	std::cerr<<"possible action " << current_valid_actions.size()<<"\n";
       //stack attention
-      Expression prev_h = state_lstm.final_h()[0];
       vector<Expression> s_att;
       vector<Expression> s_input;
       s_att.push_back(tanh(affine_transform({s_attbias, s_input2att, sent_start_expr, s_h2att, prev_h})));
@@ -399,7 +444,10 @@ if(DEBUG)	std::cerr<<"possible action " << current_valid_actions.size()<<"\n";
 
       //
 if(DEBUG)	std::cerr<<"attention ok\n";
+      Expression h = state_lstm.add_input(concatenate({prev_action, s_att_pool, b_att_pool}));
+if(DEBUG)	std::cerr<<"state lstm ok\n";
       Expression combo = affine_transform({combobias, h2combo, prev_h, s_att2combo, s_att_pool, b_att2combo, b_att_pool});
+      prev_h = h;
       Expression n_combo = rectify(combo);
       Expression rt = affine_transform({rtbias, combo2rt, n_combo});
 if(DEBUG)	std::cerr<<"to action layer ok\n";
@@ -425,7 +473,8 @@ if(DEBUG)	std::cerr<<"best action "<<best_a<<" " << setOfActions[best_a]<<"\n";
 
       // add current action to action LSTM
       Expression actione = lookup(*hg, p_a, action);
-      state_lstm.add_input(concatenate({actione, s_att_pool, b_att_pool}));
+      prev_action = actione;
+      
       // do action
       const string& actionString=setOfActions[action];
       const char ac = actionString[0];
