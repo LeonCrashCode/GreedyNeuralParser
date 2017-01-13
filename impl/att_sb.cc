@@ -27,8 +27,6 @@
 #include "dynet/rnn.h"
 #include "c2.h"
 
-unsigned BATCH_SIZE = 100;
-unsigned BEAM_SIZE = 8;
 float pdrop = 0.3;
 bool DEBUG = false;
 cpyp::Corpus corpus;
@@ -44,7 +42,9 @@ unsigned BILSTM_INPUT_DIM = 64;
 unsigned BILSTM_HIDDEN_DIM = 64;
 unsigned ATTENTION_HIDDEN_DIM = 64;
 
-unsigned STATE_INPUT_DIM = ACTION_DIM + ATTENTION_HIDDEN_DIM;
+
+unsigned UPPER_HIDDEN_DIM = 64;
+unsigned STATE_INPUT_DIM = ACTION_DIM + UPPER_HIDDEN_DIM;
 unsigned STATE_HIDDEN_DIM = 64; 
 bool USE_POS = false;
 
@@ -82,6 +82,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
         ("bilstm_hidden_dim", po::value<unsigned>()->default_value(64), "bilstm hidden dimension")
 	("attention_hidden_dim", po::value<unsigned>()->default_value(64), "attention hidden dimension")
 	("state_hidden_dim", po::value<unsigned>()->default_value(64), "state hidden dimension")
+	("upper_hidden_dim", po::value<unsigned>()->default_value(64), "upper_hidden_dim")
 	("pdrop", po::value<float>()->default_value(0.3), "pdrop")
 	("train_methods", po::value<unsigned>()->default_value(0), "0 for simple, 1 for mon, 2 for adagrad, 3 for adam")
 	("debug", "debug")
@@ -101,61 +102,6 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
   }
 }
 
-struct BeamItem{
-	unsigned stack_size;
-	unsigned buffer_size;
-	unsigned stack_buffer_split;
-	float score;
-
-	int state_index;
-	int beam_index;
-	bool gold;
-
-	// for extended lattice
-	int act;
-	int se_map;
-	int att_map;
-
-	BeamItem(unsigned m_stack_size, unsigned m_buffer_size, unsigned m_stack_buffer_split, float m_score,
-		int m_state_index, int m_beam_index, bool m_gold,
-		int m_act = -1, int m_se_map = -1, int m_att_map = -1){
-			stack_size = m_stack_size;
-			buffer_size = m_buffer_size;
-			stack_buffer_split = m_stack_buffer_split;
-			score = m_score;
-
-			state_index = m_state_index;
-			beam_index = m_beam_index;
-			gold = m_gold;
-			
-			act = m_act;
-			se_map = m_se_map;
-			att_map = m_att_map;
-		};
-	~BeamItem(){};
-
-	void show(const vector<string>& setOfActions) const{
-		std::cerr<<"*******\n"
-			<<"stack_size "<<stack_size <<"\n"
-			<<"buffer_size "<<buffer_size <<"\n"
-			<<"stack_buffer_split "<<stack_buffer_split <<"\n"
-			<<"score "<<score <<"\n"
-			
-			<<"state_index "<<state_index <<"\n"
-			<<"beam_index " << beam_index<<"\n"
-			<<"gold "<<gold <<"\n"
-
-			<<"act "<< (act < 0 ? "-1" : setOfActions[act]) <<"\n"
-			<<"se_map "<<se_map <<"\n"
-			<<"att_map "<<att_map <<"\n"
-			<<"********\n";
-	};
-};
-
-bool BeamItemCompare(const BeamItem& a, const BeamItem& b){
-	return a.score > b.score;
-}
-
 struct ParserBuilder {
 
   LSTMBuilder state_lstm;
@@ -170,8 +116,6 @@ struct ParserBuilder {
   Parameter p_p2l; // POS to LSTM input
   Parameter p_t2l; // pretrained word embeddings to LSTM input
   Parameter p_lb; // LSTM input bias
-  Parameter p_action_start; 
-  Parameter p_state_start;
 
   Parameter p_sent_start;
   Parameter p_sent_end;
@@ -201,23 +145,21 @@ struct ParserBuilder {
       p_r(model->add_lookup_parameters(ACTION_SIZE, {REL_DIM})),
       p_w2l(model->add_parameters({BILSTM_INPUT_DIM, INPUT_DIM})),
       p_lb(model->add_parameters({BILSTM_INPUT_DIM})),
-      p_action_start(model->add_parameters({ACTION_DIM})),
-      p_state_start(model->add_parameters({STATE_HIDDEN_DIM})),
       p_sent_start(model->add_parameters({BILSTM_INPUT_DIM})),
       p_sent_end(model->add_parameters({BILSTM_INPUT_DIM})),
       p_s_input2att(model->add_parameters({ATTENTION_HIDDEN_DIM, BILSTM_HIDDEN_DIM*2})),
       p_s_h2att(model->add_parameters({ATTENTION_HIDDEN_DIM, STATE_HIDDEN_DIM})),
       p_s_attbias(model->add_parameters({ATTENTION_HIDDEN_DIM})),
       p_s_att2attexp(model->add_parameters({ATTENTION_HIDDEN_DIM})),
-      p_s_att2combo(model->add_parameters({STATE_HIDDEN_DIM, BILSTM_HIDDEN_DIM*2})),
+      p_s_att2combo(model->add_parameters({UPPER_HIDDEN_DIM, BILSTM_HIDDEN_DIM*2})),
       p_b_input2att(model->add_parameters({ATTENTION_HIDDEN_DIM, BILSTM_HIDDEN_DIM*2})),
       p_b_h2att(model->add_parameters({ATTENTION_HIDDEN_DIM, STATE_HIDDEN_DIM})),
       p_b_attbias(model->add_parameters({ATTENTION_HIDDEN_DIM})),
       p_b_att2attexp(model->add_parameters({ATTENTION_HIDDEN_DIM})),
-      p_b_att2combo(model->add_parameters({STATE_HIDDEN_DIM, BILSTM_HIDDEN_DIM*2})),
-      p_h2combo(model->add_parameters({STATE_HIDDEN_DIM, STATE_HIDDEN_DIM})),
-      p_combobias(model->add_parameters({STATE_HIDDEN_DIM})),
-      p_combo2rt(model->add_parameters({ACTION_SIZE, STATE_HIDDEN_DIM})),
+      p_b_att2combo(model->add_parameters({UPPER_HIDDEN_DIM, BILSTM_HIDDEN_DIM*2})),
+      p_h2combo(model->add_parameters({UPPER_HIDDEN_DIM, STATE_HIDDEN_DIM})),
+      p_combobias(model->add_parameters({UPPER_HIDDEN_DIM})),
+      p_combo2rt(model->add_parameters({ACTION_SIZE, UPPER_HIDDEN_DIM})),
       p_rtbias(model->add_parameters({ACTION_SIZE})){
     if (USE_POS) {
       p_p = model->add_lookup_parameters(POS_SIZE, {POS_DIM});
@@ -231,16 +173,23 @@ struct ParserBuilder {
     }
   }
 
-static bool IsActionForbidden(const string& a, unsigned bsize, unsigned ssize) {
+static bool IsActionForbidden(const string& a, unsigned bsize, unsigned ssize, const vector<int>& stacki) {
+  if (a[1]=='W' && ssize<3) return true;
+  if (a[1]=='W') {
+        int top=stacki[stacki.size()-1];
+        int sec=stacki[stacki.size()-2];
+        if (sec>top) return true;
+  }
+
   bool is_shift = (a[0] == 'S' && a[1]=='H');
   bool is_reduce = !is_shift;
-  if (is_shift && bsize == 0) return true;
-  if (is_reduce && ssize < 2) return true;
-  if (bsize == 1 && // ROOT is the only thing remaining on buffer
-      ssize > 1 && // there is more than a single element on the stack
+  if (is_shift && bsize == 1) return true;
+  if (is_reduce && ssize < 3) return true;
+  if (bsize == 2 && // ROOT is the only thing remaining on buffer
+      ssize > 2 && // there is more than a single element on the stack
       is_shift) return true;
   // only attach left to ROOT
-  if (bsize == 0 && ssize == 2 && a[0] == 'R') return true;
+  if (bsize == 1 && ssize == 3 && a[0] == 'R') return true;
   return false;
 }
 
@@ -304,16 +253,15 @@ Expression log_prob_parser(ComputationGraph* hg,
                      const vector<string>& setOfActions,
                      const map<unsigned, std::string>& intToWords,
                      double *right,
-		     double *early_update,
 		     vector<unsigned>* results,
 		     bool train) {
+    const bool build_training_graph = correct_actions.size() > 0;
+
     l2rbuilder.new_graph(*hg);
     r2lbuilder.new_graph(*hg);
     l2rbuilder.start_new_sequence();
     r2lbuilder.start_new_sequence();
     // variables in the computation graph representing the parameters
-    Expression action_start = parameter(*hg, p_action_start);
-    Expression state_start = parameter(*hg, p_state_start);
     Expression lb = parameter(*hg, p_lb);
     Expression w2l = parameter(*hg, p_w2l);
     Expression p2l;
@@ -389,279 +337,12 @@ if(DEBUG)	std::cerr<<"lookup table ok\n";
     Expression sent_end_expr = concatenate({l2r_e, r2l_e});
 if(DEBUG)	std::cerr<<"bilstm ok\n";
     // dummy symbol to represent the empty buffer
+    vector<int> bufferi(sent.size() + 1);
+    bufferi[0] = -999;
+    vector<int> stacki;
+    stacki.push_back(-999);
  
-    Expression log_probs;
-    string rootword;
-    unsigned action_count = 0;  // incremented at each prediction
-    
-    vector<Expression> l2rhc = l2rbuilder.final_s();
-    vector<Expression> r2lhc = r2lbuilder.final_s();
-
-    vector<Expression> initc;
-    for(unsigned i = 0; i < LAYERS; i ++){
-      initc.push_back(concatenate({l2rhc[i],r2lhc[i]}));
-    }
-
-    for(unsigned i = 0; i < LAYERS; i ++){
-      initc.push_back(zeroes(*hg, {BILSTM_HIDDEN_DIM*2}));
-    }
-    state_lstm.start_new_sequence(initc);
-    
-    vector< vector<BeamItem> > lattice(sent.size()*2);
-    vector< vector<Expression> > lattice_scoree(sent.size()*2);
-    vector<BeamItem> expand_lattice;
-
-    lattice[0].push_back(BeamItem(0, sent.size(), 0, 0, -1, -1, true));
-    lattice_scoree[0].push_back(zeroes(*hg,{1}));
-    while(action_count < sent.size()*2-1) {
-if(DEBUG)	std::cerr<<"=========================action index " << action_count<<"\n";
-     // get list of possible actions for the current parser state
-      vector<BeamItem> expand_lattice;
-      vector<Expression> scorees;
-      vector<Expression> s_att_pools;
-      vector<Expression> b_att_pools;
-      for(unsigned beam_index = 0; beam_index < lattice[action_count].size(); beam_index ++){
-if(DEBUG)	std::cerr<<"------------------------beam index " << beam_index<<"\n";	
-	const BeamItem& beam = lattice[action_count][beam_index];
-
-if(DEBUG)	{std::cerr<<"beam state\n"; beam.show(setOfActions);}
-	unsigned stack_buffer_split = beam.stack_buffer_split;
-        vector<unsigned> current_valid_actions;
-	for(auto a:possible_actions) {
-		if(IsActionForbidden(setOfActions[a], beam.buffer_size, beam.stack_size))
-			continue;
-		current_valid_actions.push_back(a);
-	}
-	
-	Expression h = state_lstm.get_h((RNNPointer)beam.state_index).back();
-
-	vector<Expression> s_att;
-        vector<Expression> s_input;
-        s_att.push_back(tanh(affine_transform({s_attbias, s_input2att, sent_start_expr, s_h2att, h})));
-        s_input.push_back(sent_start_expr);
-        for(unsigned i = 0; i < stack_buffer_split; i ++){
-          s_att.push_back(tanh(affine_transform({s_attbias, s_input2att, input[i], s_h2att, h})));
-          s_input.push_back(input[i]);
-        }
-        Expression s_att_col = transpose(concatenate_cols(s_att));
-        Expression s_attexp = softmax(s_att_col * s_att2attexp);
-
-        Expression s_input_col = concatenate_cols(s_input);
-        Expression s_att_pool = s_input_col * s_attexp;
-
-        vector<Expression> b_att;
-        vector<Expression> b_input;
-        for(unsigned i = stack_buffer_split; i < sent.size(); i ++){
-          b_att.push_back(tanh(affine_transform({b_attbias, b_input2att, input[i], b_h2att, h})));
-          b_input.push_back(input[i]);
-        }
-        b_att.push_back(tanh(affine_transform({b_attbias, b_input2att, sent_end_expr, b_h2att, h})));
-        b_input.push_back(sent_end_expr);
-        Expression b_att_col = transpose(concatenate_cols(b_att));
-        Expression b_attexp = softmax(b_att_col * b_att2attexp);
-
-        Expression b_input_col = concatenate_cols(b_input);
-        Expression b_att_pool = b_input_col * b_attexp;
-
-if(DEBUG)       std::cerr<<"attention ok\n";
-	Expression combo = affine_transform({combobias, h2combo, h, s_att2combo, s_att_pool, b_att2combo, b_att_pool});
-	Expression n_combo = rectify(combo);
-      	Expression rt = affine_transform({rtbias, combo2rt, n_combo});
-if(DEBUG)       std::cerr<<"to action layer ok\n";
-
-	s_att_pools.push_back(s_att_pool);
-        b_att_pools.push_back(b_att_pool);
-	for(unsigned i = 0; i < current_valid_actions.size(); i ++){
-		/*vector<float> mask;
-		mask.resize(ACTION_SIZE, 0);
-		mask[current_valid_actions[i]] = 1;
-		Expression maske = input(*hg, {ACTION_SIZE}, mask);
-		Expression scoree = transpose(maske) * rt;
-		*/
-if(DEBUG)	std::cerr<<"current_valid_actions "<<i<<" ";
-		Expression scoree = select_rows(rt, {current_valid_actions[i]});
-		float score = as_scalar(hg->incremental_forward(scoree));
-		scorees.push_back(lattice_scoree[action_count][beam_index] + scoree);
-		bool gold = false;
-		if(beam.gold && current_valid_actions[i] == correct_actions[action_count]) gold = true;
-		
-		const string& actionString=setOfActions[current_valid_actions[i]];
-      		const char ac = actionString[0];
-      		const char ac2 = actionString[1];
-		if(ac == 'S' && ac2 == 'H'){
-			expand_lattice.push_back(
-				BeamItem(
-						beam.stack_size+1,
-						beam.buffer_size-1,
-						beam.stack_buffer_split+1,
-						beam.score+score,
-						beam.state_index,
-						beam_index,
-						gold,
-						(int)current_valid_actions[i],
-						scorees.size()-1,
-						s_att_pools.size()-1
-					)
-			);
-		}
-		else{
-			expand_lattice.push_back(
-                                BeamItem(
-						beam.stack_size-1,
-						beam.buffer_size,
-                                                beam.stack_buffer_split,
-                                                beam.score+score,
-                                                beam.state_index,
-						beam_index,
-                                                gold,
-						(int)current_valid_actions[i],
-                                                scorees.size()-1,
-                                                s_att_pools.size()-1
-                                        )
-                        );
-		}
-
-	} // current_valid_actions
-      }	// beam
-      sort(expand_lattice.begin(), expand_lattice.end(),  BeamItemCompare);
-if(DEBUG)		std::cerr<<"qsort done\n";
-
-      unsigned gold_index = 0;
-      for(unsigned i = 0; i < expand_lattice.size(); i ++){
-      	if(expand_lattice[i].gold == true) {gold_index = i; break;}
-      }
-if(DEBUG)		std::cerr<<"gold_index "<<gold_index<<"\n";
-      // early_update
-      if(gold_index >= BEAM_SIZE || action_count == sent.size()*2-2){
-		if(action_count == sent.size()*2-2){
-			if(gold_index == 0)	*right += 1;
-		}
-		else{
-if(DEBUG)		std::cerr<<"early update\n";
-			*early_update += 1;
-		}
-    		Expression samples = concatenate(scorees);
-		log_probs = pickneglogsoftmax(samples, expand_lattice[gold_index].se_map);
-		break;
-      }
-      else{
-		lattice.clear();
-        	for(unsigned i = 0; i < expand_lattice.size() && i < BEAM_SIZE; i ++) {
-			lattice[action_count+1].push_back(expand_lattice[i]);
-			lattice_scoree[action_count+1].push_back(scorees[expand_lattice[i].se_map]);
-if(DEBUG)       	expand_lattice[i].show(setOfActions);		
-		}
-if(DEBUG)	std::cerr<<"state_transition ";
-		for(unsigned i = 0; i < lattice[action_count+1].size(); i ++){
-			Expression actione = lookup(*hg, p_a, lattice[action_count+1][i].act);
-			state_lstm.add_input((RNNPointer)lattice[action_count+1][i].state_index, concatenate({actione, s_att_pools[lattice[action_count+1][i].att_map], b_att_pools[lattice[action_count+1][i].att_map]}));
-			lattice[action_count+1][i].state_index = state_lstm.h.size()-1;
-		}
-if(DEBUG)	std::cerr<<"done\n";
-      }
-      expand_lattice.clear();
-      scorees.clear();
-      s_att_pools.clear();
-      b_att_pools.clear();
-      action_count++;
-    }// action account
-    return log_probs;
-  }
-
-void log_prob_parser_decoder(ComputationGraph* hg,
-                     const vector<unsigned>& raw_sent,  // raw sentence
-                     const vector<unsigned>& sent,  // sent with oovs replaced
-                     const vector<unsigned>& sentPos,
-                     const vector<unsigned>& correct_actions,
-                     const vector<string>& setOfActions,
-                     const map<unsigned, std::string>& intToWords,
-                     double *right,
-		     double *early_update,
-		     vector<unsigned>* results,
-		     bool train) {
-    l2rbuilder.new_graph(*hg);
-    r2lbuilder.new_graph(*hg);
-    l2rbuilder.start_new_sequence();
-    r2lbuilder.start_new_sequence();
-    // variables in the computation graph representing the parameters
-    Expression action_start = parameter(*hg, p_action_start);
-    Expression state_start = parameter(*hg, p_state_start);
-    Expression lb = parameter(*hg, p_lb);
-    Expression w2l = parameter(*hg, p_w2l);
-    Expression p2l;
-    if (USE_POS)
-      p2l = parameter(*hg, p_p2l);
-    Expression t2l;
-    if (pretrained.size()>0)
-      t2l = parameter(*hg, p_t2l); 
-    state_lstm.new_graph(*hg);
-    state_lstm.start_new_sequence();
-    //state_lstm.start_new_sequence({zeroes(*hg, {STATE_HIDDEN_DIM}), state_start});
-    
-    Expression sent_start = parameter(*hg, p_sent_start);
-    Expression sent_end = parameter(*hg, p_sent_end);
-    //stack attention
-    Expression s_input2att = parameter(*hg, p_s_input2att);
-    Expression s_h2att = parameter(*hg, p_s_h2att);
-    Expression s_attbias = parameter(*hg, p_s_attbias);
-    Expression s_att2attexp = parameter(*hg, p_s_att2attexp);
-    Expression s_att2combo = parameter(*hg, p_s_att2combo);
-
-    //buffer attention
-    Expression b_input2att = parameter(*hg, p_b_input2att);
-    Expression b_h2att = parameter(*hg, p_b_h2att);
-    Expression b_attbias = parameter(*hg, p_b_attbias);
-    Expression b_att2attexp = parameter(*hg, p_b_att2attexp);
-    Expression b_att2combo = parameter(*hg, p_b_att2combo);
-
-    Expression h2combo = parameter(*hg, p_h2combo);
-    Expression combobias = parameter(*hg, p_combobias);
-    Expression combo2rt = parameter(*hg, p_combo2rt);
-    Expression rtbias = parameter(*hg, p_rtbias);
-    vector<Expression> input_expr;
-    for (unsigned i = 0; i < sent.size(); ++i) {
-      assert(sent[i] < VOCAB_SIZE);
-      Expression w =lookup(*hg, p_w, sent[i]);
-      if(train) w = dropout(w,pdrop);
-      vector<Expression> args = {lb, w2l, w}; // learn embeddings
-      if (USE_POS) { // learn POS tag?
-        Expression p = lookup(*hg, p_p, sentPos[i]);
-        if(train) p = dropout(p,pdrop);
-        args.push_back(p2l);
-        args.push_back(p);
-      }
-      if (pretrained.size() > 0 &&  pretrained.count(raw_sent[i])) {  // include fixed pretrained vectors?
-        Expression t = const_lookup(*hg, p_t, raw_sent[i]);
-        if(train) t = dropout(t,pdrop);
-        args.push_back(t2l);
-        args.push_back(t);
-      }
-      else{
-        args.push_back(t2l);
-        args.push_back(zeroes(*hg,{PRETRAINED_DIM}));
-      }
-      input_expr.push_back(rectify(affine_transform(args)));
-    }
-if(DEBUG)	std::cerr<<"lookup table ok\n";
-    vector<Expression> l2r(sent.size());
-    vector<Expression> r2l(sent.size());
-    Expression l2r_s = l2rbuilder.add_input(sent_start);
-    Expression r2l_e = r2lbuilder.add_input(sent_end);
-    for (unsigned i = 0; i < sent.size(); ++i) {
-      l2r[i] = l2rbuilder.add_input(input_expr[i]);
-      r2l[sent.size() - 1 - i] = r2lbuilder.add_input(input_expr[sent.size()-1-i]);
-    }
-    Expression l2r_e = l2rbuilder.add_input(sent_end);
-    Expression r2l_s = r2lbuilder.add_input(sent_start);
-    vector<Expression> input(sent.size());
-    for (unsigned i = 0; i < sent.size(); ++i) {
-      input[i] = concatenate({l2r[i],r2l[i]});
-    }
-    Expression sent_start_expr = concatenate({l2r_s, r2l_s});
-    Expression sent_end_expr = concatenate({l2r_e, r2l_e});
-if(DEBUG)	std::cerr<<"bilstm ok\n";
-    // dummy symbol to represent the empty buffer
- 
+    unsigned stack_buffer_split = 0;
     vector<Expression> log_probs;
     string rootword;
     unsigned action_count = 0;  // incremented at each prediction
@@ -678,148 +359,113 @@ if(DEBUG)	std::cerr<<"bilstm ok\n";
       initc.push_back(zeroes(*hg, {BILSTM_HIDDEN_DIM*2}));
     }
     state_lstm.start_new_sequence(initc);
-    
-    vector< vector<BeamItem> > lattice(sent.size()*2);
-    vector<BeamItem> expand_lattice;
 
-    lattice[0].push_back(BeamItem(0, sent.size(), 0, 0, -1, -1, true));
-    while(action_count < sent.size()*2-1) {
-if(DEBUG)	std::cerr<<"=========================action index " << action_count<<"\n";
+    while(stacki.size() > 2 || bufferi.size() > 1) {
+if(DEBUG)	std::cerr<<"action index " << action_count<<"\n";
      // get list of possible actions for the current parser state
-      vector<BeamItem> expand_lattice;
-      vector<Expression> s_att_pools;
-      vector<Expression> b_att_pools;
-      for(unsigned beam_index = 0; beam_index < lattice[action_count].size(); beam_index ++){
-if(DEBUG)	std::cerr<<"------------------------beam index " << beam_index<<"\n";	
-	const BeamItem& beam = lattice[action_count][beam_index];
-
-if(DEBUG)	{std::cerr<<"beam state\n"; beam.show(setOfActions);}
-	unsigned stack_buffer_split = beam.stack_buffer_split;
-        vector<unsigned> current_valid_actions;
-	for(auto a:possible_actions) {
-		if(IsActionForbidden(setOfActions[a], beam.buffer_size, beam.stack_size))
-			continue;
-		current_valid_actions.push_back(a);
-	}
-	
-	Expression h = state_lstm.get_h((RNNPointer)beam.state_index).back();
-
-	vector<Expression> s_att;
-        vector<Expression> s_input;
-        s_att.push_back(tanh(affine_transform({s_attbias, s_input2att, sent_start_expr, s_h2att, h})));
-        s_input.push_back(sent_start_expr);
-        for(unsigned i = 0; i < stack_buffer_split; i ++){
-          s_att.push_back(tanh(affine_transform({s_attbias, s_input2att, input[i], s_h2att, h})));
-          s_input.push_back(input[i]);
-        }
-        Expression s_att_col = transpose(concatenate_cols(s_att));
-        Expression s_attexp = softmax(s_att_col * s_att2attexp);
-
-        Expression s_input_col = concatenate_cols(s_input);
-        Expression s_att_pool = s_input_col * s_attexp;
-
-        vector<Expression> b_att;
-        vector<Expression> b_input;
-        for(unsigned i = stack_buffer_split; i < sent.size(); i ++){
-          b_att.push_back(tanh(affine_transform({b_attbias, b_input2att, input[i], b_h2att, h})));
-          b_input.push_back(input[i]);
-        }
-        b_att.push_back(tanh(affine_transform({b_attbias, b_input2att, sent_end_expr, b_h2att, h})));
-        b_input.push_back(sent_end_expr);
-        Expression b_att_col = transpose(concatenate_cols(b_att));
-        Expression b_attexp = softmax(b_att_col * b_att2attexp);
-
-        Expression b_input_col = concatenate_cols(b_input);
-        Expression b_att_pool = b_input_col * b_attexp;
-
-if(DEBUG)       std::cerr<<"attention ok\n";
-	Expression combo = affine_transform({combobias, h2combo, h, s_att2combo, s_att_pool, b_att2combo, b_att_pool});
-	Expression n_combo = rectify(combo);
-      	Expression rt = affine_transform({rtbias, combo2rt, n_combo});
-if(DEBUG)       std::cerr<<"to action layer ok\n";
-
-	s_att_pools.push_back(s_att_pool);
-        b_att_pools.push_back(b_att_pool);
-	for(unsigned i = 0; i < current_valid_actions.size(); i ++){
-		/*vector<float> mask;
-		mask.resize(ACTION_SIZE, 0);
-		mask[current_valid_actions[i]] = 1;
-		Expression maske = input(*hg, {ACTION_SIZE}, mask);
-		Expression scoree = transpose(maske) * rt;
-		*/
-if(DEBUG)	std::cerr<<"current_valid_actions "<<i<<" ";
-		Expression scoree = select_rows(rt, {current_valid_actions[i]});
-		float score = as_scalar(hg->incremental_forward(scoree));
-		
-		const string& actionString=setOfActions[current_valid_actions[i]];
-      		const char ac = actionString[0];
-      		const char ac2 = actionString[1];
-//if(DEBUG)       std::cerr<<actionString<<"\n";
-		if(ac == 'S' && ac2 == 'H'){
-			expand_lattice.push_back(
-				BeamItem(
-						beam.stack_size+1,
-						beam.buffer_size-1,
-						beam.stack_buffer_split+1,
-						beam.score+score,
-						beam.state_index,
-						beam_index,
-						false,
-						(int)current_valid_actions[i],
-						-1,
-						s_att_pools.size()-1
-					)
-			);
-		}
-		else{
-			expand_lattice.push_back(
-                                BeamItem(
-						beam.stack_size-1,
-						beam.buffer_size,
-                                                beam.stack_buffer_split,
-                                                beam.score+score,
-                                                beam.state_index,
-						beam_index,
-                                                false,
-						(int)current_valid_actions[i],
-                                                -1,
-                                                s_att_pools.size()-1
-                                        )
-                        );
-		}
-	} // current_valid_actions
-      }	// beam
-      sort(expand_lattice.begin(), expand_lattice.end(),  BeamItemCompare);
-if(DEBUG)		std::cerr<<"qsort done\n";
-
-      lattice.clear();
-      for(unsigned i = 0; i < expand_lattice.size() && i < BEAM_SIZE; i ++) {
-		lattice[action_count+1].push_back(expand_lattice[i]);
-if(DEBUG)	expand_lattice[i].show(setOfActions);
+      vector<unsigned> current_valid_actions;
+      for (auto a: possible_actions) {
+        if (IsActionForbidden(setOfActions[a], bufferi.size(), stacki.size(), stacki))
+          continue;
+        current_valid_actions.push_back(a);
       }
-if(DEBUG)	std::cerr<<"state_transition ";
-      for(unsigned i = 0; i < lattice[action_count+1].size(); i ++){
-		Expression actione = lookup(*hg, p_a, lattice[action_count+1][i].act);
-		state_lstm.add_input((RNNPointer)lattice[action_count+1][i].state_index, concatenate({actione, s_att_pools[lattice[action_count+1][i].att_map], b_att_pools[lattice[action_count+1][i].att_map]}));
-		lattice[action_count+1][i].state_index = state_lstm.h.size()-1;
+if(DEBUG)	std::cerr<<"possible action " << current_valid_actions.size()<<"\n";
+      //stack attention
+      Expression prev_h = state_lstm.final_h()[0];
+      vector<Expression> s_att;
+      vector<Expression> s_input;
+      s_att.push_back(tanh(affine_transform({s_attbias, s_input2att, sent_start_expr, s_h2att, prev_h})));
+      s_input.push_back(sent_start_expr);
+      for(unsigned i = 0; i < stack_buffer_split; i ++){
+        s_att.push_back(tanh(affine_transform({s_attbias, s_input2att, input[i], s_h2att, prev_h})));
+        s_input.push_back(input[i]);
       }
-if(DEBUG)	std::cerr<<"done\n";
-      expand_lattice.clear();
-      s_att_pools.clear();
-      b_att_pools.clear();
+      Expression s_att_col = transpose(concatenate_cols(s_att));
+      Expression s_attexp = softmax(s_att_col * s_att2attexp);
 
-      action_count++;
-    }// action account
-    
-    int best_index = 0;
-    int lattice_index = action_count;
-    while(lattice_index > 0){
-if(DEBUG)	std::cerr<<setOfActions[lattice[lattice_index][best_index].act]<<"\n";
-    	results->push_back(lattice[lattice_index][best_index].act);
-	best_index = lattice[lattice_index][best_index].beam_index;
-	lattice_index -= 1;
+      Expression s_input_col = concatenate_cols(s_input);
+      Expression s_att_pool = s_input_col * s_attexp;
+
+      vector<Expression> b_att;
+      vector<Expression> b_input;
+      for(unsigned i = stack_buffer_split; i < sent.size(); i ++){
+        b_att.push_back(tanh(affine_transform({b_attbias, b_input2att, input[i], b_h2att, prev_h})));
+        b_input.push_back(input[i]);
+      }
+      b_att.push_back(tanh(affine_transform({b_attbias, b_input2att, sent_end_expr, b_h2att, prev_h})));
+      b_input.push_back(sent_end_expr);
+      Expression b_att_col = transpose(concatenate_cols(b_att));
+      Expression b_attexp = softmax(b_att_col * b_att2attexp);
+
+      Expression b_input_col = concatenate_cols(b_input);
+      Expression b_att_pool = b_input_col * b_attexp;
+
+      //
+if(DEBUG)	std::cerr<<"attention ok\n";
+      Expression combo = affine_transform({combobias, h2combo, prev_h, s_att2combo, s_att_pool, b_att2combo, b_att_pool});
+      Expression n_combo = tanh(combo);
+      Expression rt = affine_transform({rtbias, combo2rt, n_combo});
+if(DEBUG)	std::cerr<<"to action layer ok\n";
+      Expression adiste = log_softmax(rt, current_valid_actions);
+      vector<float> adist = as_vector(hg->incremental_forward(adiste));
+      double best_score = adist[current_valid_actions[0]];
+      unsigned best_a = current_valid_actions[0];
+      for (unsigned i = 1; i < current_valid_actions.size(); ++i) {
+        if (adist[current_valid_actions[i]] > best_score) {
+          best_score = adist[current_valid_actions[i]];
+          best_a = current_valid_actions[i];
+        }
+      }
+if(DEBUG)	std::cerr<<"best action "<<best_a<<" " << setOfActions[best_a]<<"\n";
+      unsigned action = best_a;
+      if (build_training_graph) {  // if we have reference actions (for training) use the reference action
+        action = correct_actions[action_count];
+        if (best_a == action) { (*right)++; }
+      }
+      ++action_count;
+      log_probs.push_back(pick(adiste, action));
+      if(results) results->push_back(action);
+
+      // add current action to action LSTM
+      Expression actione = lookup(*hg, p_a, action);
+      state_lstm.add_input(concatenate({actione, n_combo}));
+      // do action
+      const string& actionString=setOfActions[action];
+      const char ac = actionString[0];
+      const char ac2 = actionString[1];
+
+if(DEBUG)	std::cerr<<"action lookup ok\n";
+      if (ac =='S' && ac2=='H') {  // SHIFT
+        stacki.push_back(bufferi.back());
+        bufferi.pop_back();
+	stack_buffer_split += 1;
+      } else if (ac=='S' && ac2=='W'){ //SWAP --- Miguel
+        Expression toki, tokj;
+        unsigned ii = 0, jj = 0;
+        jj=stacki.back();
+        stacki.pop_back();
+        ii=stacki.back();
+        stacki.pop_back();
+        bufferi.push_back(ii);
+        stacki.push_back(jj);
+      } else { // LEFT or RIGHT
+        assert(ac == 'L' || ac == 'R');
+        unsigned depi = 0, headi = 0;
+        (ac == 'R' ? depi : headi) = stacki.back();
+        stacki.pop_back();
+        (ac == 'R' ? headi : depi) = stacki.back();
+        stacki.pop_back();
+        if (headi == sent.size() - 1) rootword = intToWords.find(sent[depi])->second;
+        // composed = cbias + H * head + D * dep + R * relation
+        stacki.push_back(headi);
+      }
+if(DEBUG)	std::cerr<<"state transit ok\n";
     }
-    reverse(results->begin(), results->end());
+    assert(stacki.size() == 2);
+    assert(bufferi.size() == 1);
+    Expression tot_neglogprob = -sum(log_probs);
+    assert(tot_neglogprob.pg != nullptr);
+    return tot_neglogprob;
   }
 };
 
@@ -891,7 +537,7 @@ int main(int argc, char** argv) {
   cerr << "COMMAND:"; 
   for (unsigned i = 0; i < static_cast<unsigned>(argc); ++i) cerr << ' ' << argv[i];
   cerr << endl;
-  unsigned status_every_i_iterations = 10;
+  unsigned status_every_i_iterations = 100;
 
   po::variables_map conf;
   InitCommandLine(argc, argv, &conf);
@@ -907,7 +553,7 @@ int main(int argc, char** argv) {
   BILSTM_INPUT_DIM = conf["bilstm_input_dim"].as<unsigned>();
   BILSTM_HIDDEN_DIM = conf["bilstm_hidden_dim"].as<unsigned>();
   ATTENTION_HIDDEN_DIM = conf["attention_hidden_dim"].as<unsigned>();
-  STATE_INPUT_DIM = ACTION_DIM + BILSTM_HIDDEN_DIM*2 + BILSTM_HIDDEN_DIM*2;
+  STATE_INPUT_DIM = ACTION_DIM + UPPER_HIDDEN_DIM;
   STATE_HIDDEN_DIM = conf["state_hidden_dim"].as<unsigned>();
  
   STATE_HIDDEN_DIM = BILSTM_HIDDEN_DIM * 2;
@@ -1004,7 +650,7 @@ int main(int argc, char** argv) {
     }
     else if(method == 3){
         sgd = new AdamTrainer(&model);
-        sgd->clipping_enabled = true;
+        sgd->clipping_enabled = false;
     }
 
     vector<unsigned> order(corpus.nsentences);
@@ -1014,7 +660,7 @@ int main(int argc, char** argv) {
     status_every_i_iterations = min(status_every_i_iterations, corpus.nsentences);
     unsigned si = corpus.nsentences;
     cerr << "NUMBER OF TRAINING SENTENCES: " << corpus.nsentences << endl;
-    double early_update = 0;
+    unsigned trs = 0;
     double right = 0;
     double llh = 0;
     bool first = true;
@@ -1024,52 +670,46 @@ int main(int argc, char** argv) {
     while(!requested_stop) {
       ++iter;
       for (unsigned sii = 0; sii < status_every_i_iterations; ++sii) {
-	    vector<Expression> nlls;
-	    ComputationGraph hg;
-	    for(unsigned batch_index = 0; batch_index < BATCH_SIZE; ++batch_index){
-           	if (si == corpus.nsentences) {
-             		si = 0;
-             		if (first) { first = false; } else { sgd->update_epoch(); }
-             		cerr << "**SHUFFLE\n";
-             		random_shuffle(order.begin(), order.end());
-           	}
-           	tot_seen += 1;
-           	const vector<unsigned>& sentence=corpus.sentences[order[si]];
-           	vector<unsigned> tsentence=sentence;
-           	if (unk_strategy == 1) {
-             		for (auto& w : tsentence)
-               			if (singletons.count(w) && dynet::rand01() < unk_prob) w = kUNK;
-           	}
-	   	const vector<unsigned>& sentencePos=corpus.sentencesPos[order[si]]; 
-	   	const vector<unsigned>& actions=corpus.correct_act_sent[order[si]];
-           	Expression nll = parser.log_prob_parser(&hg,sentence,tsentence,sentencePos,actions,corpus.actions,corpus.intToWords,&right,&early_update,NULL,true);
-           	nlls.push_back(nll);
-		double lp = as_scalar(hg.incremental_forward(nll));
-           	if (lp < 0) {
-             		cerr << "Log prob < 0 on sentence " << order[si] << ": lp=" << lp << endl;
-             		assert(lp >= 0.0);
-           	}
-           	++si;
-	   }
-	   Expression tot_nll = sum(nlls);
-	   double tot_lp = as_scalar(hg.incremental_forward(tot_nll));
-           hg.backward(tot_nll);
-	   sgd->update(1.0);
-	   llh += tot_lp;
-	   
+           if (si == corpus.nsentences) {
+             si = 0;
+             if (first) { first = false; } else { sgd->update_epoch(); }
+             cerr << "**SHUFFLE\n";
+             random_shuffle(order.begin(), order.end());
+           }
+           tot_seen += 1;
+           const vector<unsigned>& sentence=corpus.sentences[order[si]];
+           vector<unsigned> tsentence=sentence;
+           if (unk_strategy == 1) {
+             for (auto& w : tsentence)
+               if (singletons.count(w) && dynet::rand01() < unk_prob) w = kUNK;
+           }
+	   const vector<unsigned>& sentencePos=corpus.sentencesPos[order[si]]; 
+	   const vector<unsigned>& actions=corpus.correct_act_sent[order[si]];
+           ComputationGraph hg;
+           Expression nll = parser.log_prob_parser(&hg,sentence,tsentence,sentencePos,actions,corpus.actions,corpus.intToWords,&right,NULL,true);
+           double lp = as_scalar(hg.incremental_forward(nll));
+           if (lp < 0) {
+             cerr << "Log prob < 0 on sentence " << order[si] << ": lp=" << lp << endl;
+             assert(lp >= 0.0);
+           }
+           hg.backward(nll);
+           sgd->update(1.0);
+           llh += lp;
+           ++si;
+           trs += actions.size();
       }
       sgd->status();
       time_t time_now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-      cerr << "update #" << iter << " (epoch " << (tot_seen / corpus.nsentences) << " |time=" << localtime(&time_now) << ")\tllh: "<< llh<<" ppl: " << exp(llh / (status_every_i_iterations * BATCH_SIZE)) << " err: " << ((status_every_i_iterations*BATCH_SIZE) - right) / (status_every_i_iterations*BATCH_SIZE) << " early_update: "<< early_update << endl;
-      llh = early_update = right = 0;
+      cerr << "update #" << iter << " (epoch " << (tot_seen / corpus.nsentences) << " |time=" << localtime(&time_now) << ")\tllh: "<< llh<<" ppl: " << exp(llh / trs) << " err: " << (trs - right) / trs << endl;
+      llh = trs = right = 0;
 
       static int logc = 0;
       ++logc;
-      if (logc % 25 == 0) { // report on dev set
+      if (logc % 25 == 1) { // report on dev set
         unsigned dev_size = corpus.nsentencesDev;
         // dev_size = 100;
         double llh = 0;
-        double early_update = 0;
+        double trs = 0;
         double right = 0;
         double correct_heads = 0;
         double total_heads = 0;
@@ -1084,9 +724,10 @@ int main(int argc, char** argv) {
 
            ComputationGraph hg;
 	   vector<unsigned> pred;
-	   parser.log_prob_parser_decoder(&hg,sentence,tsentence,sentencePos,vector<unsigned>(),corpus.actions,corpus.intToWords,&right,&early_update, &pred,false);
+	   parser.log_prob_parser(&hg,sentence,tsentence,sentencePos,vector<unsigned>(),corpus.actions,corpus.intToWords,&right,&pred,false);
 	   double lp = 0;
            llh -= lp;
+           trs += actions.size();
            map<int,int> ref = parser.compute_heads(sentence.size(), actions, corpus.actions);
            map<int,int> hyp = parser.compute_heads(sentence.size(), pred, corpus.actions);
            //output_conll(sentence, corpus.intToWords, ref, hyp);
@@ -1094,7 +735,7 @@ int main(int argc, char** argv) {
            total_heads += sentence.size() - 1;
         }
         auto t_end = std::chrono::high_resolution_clock::now();
-        cerr << "  **dev (iter=" << iter << " epoch=" << (tot_seen / corpus.nsentences) << ")\tllh=" << llh << " ppl: " << exp(llh / dev_size) << " err: " << (dev_size - right) / dev_size <<" early_update: "<<early_update << " uas: " << (correct_heads / total_heads) << "\t[" << dev_size << " sents in " << std::chrono::duration<double, std::milli>(t_end-t_start).count() << " ms]" << endl;
+        cerr << "  **dev (iter=" << iter << " epoch=" << (tot_seen / corpus.nsentences) << ")\tllh=" << llh << " ppl: " << exp(llh / trs) << " err: " << (trs - right) / trs << " uas: " << (correct_heads / total_heads) << "\t[" << dev_size << " sents in " << std::chrono::duration<double, std::milli>(t_end-t_start).count() << " ms]" << endl;
         if (correct_heads > best_correct_heads) {
           best_correct_heads = correct_heads;
           ofstream out(fname);
@@ -1118,7 +759,7 @@ int main(int argc, char** argv) {
   } // should do training?
   if (true) { // do test evaluation
     double llh = 0;
-    double early_update = 0;
+    double trs = 0;
     double right = 0;
     double correct_heads = 0;
     double total_heads = 0;
@@ -1135,8 +776,9 @@ int main(int argc, char** argv) {
       ComputationGraph cg;
       double lp = 0;
       vector<unsigned> pred;
-      parser.log_prob_parser_decoder(&cg,sentence,tsentence,sentencePos,vector<unsigned>(),corpus.actions,corpus.intToWords,&right,&early_update,&pred,false);
+      parser.log_prob_parser(&cg,sentence,tsentence,sentencePos,vector<unsigned>(),corpus.actions,corpus.intToWords,&right,&pred,false);
       llh -= lp;
+      trs += actions.size();
       map<int, string> rel_ref, rel_hyp;
       map<int,int> ref = parser.compute_heads(sentence.size(), actions, corpus.actions, &rel_ref);
       map<int,int> hyp = parser.compute_heads(sentence.size(), pred, corpus.actions, &rel_hyp);
@@ -1145,7 +787,7 @@ int main(int argc, char** argv) {
       total_heads += sentence.size() - 1;
     }
     auto t_end = std::chrono::high_resolution_clock::now();
-    cerr << "TEST llh=" << llh << " ppl: " << exp(llh / corpus_size) << " err: " << (corpus_size - right) / corpus_size << " early_update: " << early_update <<" uas: " << (correct_heads / total_heads) << "\t[" << corpus_size << " sents in " << std::chrono::duration<double, std::milli>(t_end-t_start).count() << " ms]" << endl;
+    cerr << "TEST llh=" << llh << " ppl: " << exp(llh / trs) << " err: " << (trs - right) / trs << " uas: " << (correct_heads / total_heads) << "\t[" << corpus_size << " sents in " << std::chrono::duration<double, std::milli>(t_end-t_start).count() << " ms]" << endl;
   }
   for (unsigned i = 0; i < corpus.actions.size(); ++i) {
     //cerr << corpus.actions[i] << '\t' << parser.p_r->values[i].transpose() << endl;
