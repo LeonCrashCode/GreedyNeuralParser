@@ -348,13 +348,13 @@ if(DEBUG)	std::cerr<<"bilstm ok\n";
     vector<Expression> r2lhc = r2lbuilder.final_s();
 
     vector<Expression> initc;
-    for(unsigned i = 0; i < LAYERS; i ++){
-      initc.push_back(concatenate({l2rhc[i],r2lhc[i]}));
-    }
+    //for(unsigned i = 0; i < LAYERS; i ++){
+      initc.push_back(concatenate({l2rhc.back(),r2lhc.back()}));
+    //}
 
-    for(unsigned i = 0; i < LAYERS; i ++){
+    //for(unsigned i = 0; i < LAYERS; i ++){
       initc.push_back(zeroes(*hg, {BILSTM_HIDDEN_DIM*2}));
-    }
+    //}
     state_lstm.start_new_sequence(initc);
 
     while(stacki.size() > 2 || bufferi.size() > 1) {
